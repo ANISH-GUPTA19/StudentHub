@@ -1,0 +1,1 @@
+"""StudentHub FastAPI application."""

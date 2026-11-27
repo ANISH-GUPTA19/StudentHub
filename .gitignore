@@ -1,0 +1,32 @@
+node_modules/
+dist/
+.venv/
+__pycache__/
+*.pyc
+.env
+.env.local
+.azure/.preview-temp/
+data/
+.copilot-azure/
+
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyc
+.venv/
+venv/
+
+# Environment variables
+.env
+.env.*
+
+# Keep example environment file
+!.env.example
+
+# IDE
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
