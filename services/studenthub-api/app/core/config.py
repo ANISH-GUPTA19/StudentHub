@@ -8,9 +8,13 @@ class AppConfig:
     database_url: str
     storage_connection_string: str | None
     azure_openai_endpoint: str | None
-    auth_secret: str | None
+    auth_secret: str
+    cors_origins: list[str]
     upi_merchant_vpa: str | None
     upi_merchant_name: str
+    razorpay_key_id: str | None
+    razorpay_key_secret: str | None
+    razorpay_webhook_secret: str | None
 
 
 def require_setting(name: str) -> str:
@@ -30,18 +34,25 @@ def load_config() -> AppConfig:
         storage_connection_string = os.getenv("STORAGE_CONNECTION_STRING", "UseDevelopmentStorage=true")
     else:
         database_url = require_setting("DATABASE_URL")
-        storage_connection_string = None
+        storage_connection_string = os.getenv("STORAGE_CONNECTION_STRING")
 
     auth_secret = os.getenv("AUTH_SECRET")
     if environment != "Development" and not auth_secret:
         raise RuntimeError("Missing required environment variable: AUTH_SECRET")
 
+    raw_origins = os.getenv("CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173")
+    cors_origins = [origin.strip() for origin in raw_origins.split(",") if origin.strip()]
+
     return AppConfig(
         environment=environment,
         database_url=database_url,
         storage_connection_string=storage_connection_string,
-        azure_openai_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
+        azure_openai_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT") or None,
         auth_secret=auth_secret or "studenthub-development-secret",
-        upi_merchant_vpa=os.getenv("UPI_MERCHANT_VPA"),
+        cors_origins=cors_origins,
+        upi_merchant_vpa=os.getenv("UPI_MERCHANT_VPA") or None,
         upi_merchant_name=os.getenv("UPI_MERCHANT_NAME", "StudentHub"),
+        razorpay_key_id=os.getenv("RAZORPAY_KEY_ID") or None,
+        razorpay_key_secret=os.getenv("RAZORPAY_KEY_SECRET") or None,
+        razorpay_webhook_secret=os.getenv("RAZORPAY_WEBHOOK_SECRET") or None,
     )

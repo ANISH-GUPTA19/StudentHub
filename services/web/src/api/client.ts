@@ -1,5 +1,26 @@
 import type { ApiClient, CreateAccountRequest, LoginRequest } from './types'
-import type { Conversation, Hostel, Listing, LivingCombination, Meal, Roommate, RoomComparison, User } from '../types/entities'
+import type {
+  AdminStats,
+  Cart,
+  Conversation,
+  Hostel,
+  Listing,
+  LivingCombination,
+  Meal,
+  NotificationItem,
+  PaymentConfig,
+  PaymentOrderResult,
+  PaymentRecord,
+  Product,
+  ProductOrder,
+  Room,
+  RoomAvailabilityRoom,
+  RoomBooking,
+  RoomComparison,
+  Roommate,
+  SellerOrderItem,
+  User,
+} from '../types/entities'
 
 const BASE_URL = import.meta.env.VITE_API_BASE_URL ?? ''
 const TOKEN_KEY = 'studenthub.session.token'
@@ -13,8 +34,8 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
   const response = await fetch(`${BASE_URL}${path}`, { ...init, headers })
   if (!response.ok) {
-    const body = await response.json().catch(() => null) as { error?: { message?: string } } | null
-    throw new Error(body?.error?.message ?? `Request failed with status ${response.status}`)
+    const body = (await response.json().catch(() => null)) as { error?: { message?: string }; detail?: string } | null
+    throw new Error(body?.error?.message ?? body?.detail ?? `Request failed with status ${response.status}`)
   }
   return response.json() as Promise<T>
 }
@@ -30,6 +51,13 @@ export const liveClient: ApiClient = {
     if (!token) throw new Error('No active session')
     const result = await request<{ user: User }>('/api/auth/me')
     saveSession(token, result.user)
+    return result.user
+  },
+
+  async updateProfile(input) {
+    const result = await request<{ user: User }>('/api/auth/me', { method: 'PUT', body: JSON.stringify(input) })
+    const token = window.localStorage.getItem(TOKEN_KEY)
+    if (token) saveSession(token, result.user)
     return result.user
   },
 
@@ -58,17 +86,80 @@ export const liveClient: ApiClient = {
 
   async listHostels(filters) {
     const params = new URLSearchParams()
+    if (filters?.search) params.set('search', filters.search)
     if (filters?.area) params.set('area', filters.area)
+    if (filters?.location) params.set('location', filters.location)
+    if (filters?.minRent) params.set('min_rent', String(filters.minRent))
     if (filters?.maxRent) params.set('max_rent', String(filters.maxRent))
     if (filters?.amenities) params.set('amenities', filters.amenities)
+    if (filters?.gender) params.set('gender', filters.gender)
+    if (filters?.roomType) params.set('room_type', filters.roomType)
+    if (filters?.availableOnly) params.set('available_only', 'true')
     const query = params.toString()
     const result = await request<{ hostels: Hostel[] }>(`/api/hostels${query ? `?${query}` : ''}`)
     return result.hostels
   },
 
+  async getHostelDetail(hostelId) {
+    const result = await request<{ hostel: Hostel }>(`/api/hostels/${hostelId}`)
+    return result.hostel
+  },
+
   async createHostel(input) {
     const result = await request<{ hostel: Hostel }>('/api/hostels', { method: 'POST', body: JSON.stringify(input) })
     return result.hostel
+  },
+
+  async updateHostel(hostelId, input) {
+    const result = await request<{ hostel: Hostel }>(`/api/hostels/${hostelId}`, { method: 'PUT', body: JSON.stringify(input) })
+    return result.hostel
+  },
+
+  async addRoomToHostel(hostelId, input) {
+    const result = await request<{ room: Room }>(`/api/hostels/${hostelId}/rooms`, { method: 'POST', body: JSON.stringify(input) })
+    return result.room
+  },
+
+  async updateRoom(roomId, input) {
+    const result = await request<{ room: Room }>(`/api/rooms/${roomId}`, { method: 'PATCH', body: JSON.stringify(input) })
+    return result.room
+  },
+
+  async checkRoomAvailability(hostelId, checkInDate, durationMonths, roomId) {
+    const params = new URLSearchParams({ check_in_date: checkInDate, duration_months: String(durationMonths) })
+    if (roomId) params.set('room_id', roomId)
+    return request<{ available: boolean; checkOutDate: string; rooms: RoomAvailabilityRoom[] }>(`/api/hostels/${hostelId}/availability?${params.toString()}`)
+  },
+
+  async createRoomBooking(input) {
+    const result = await request<{ booking: RoomBooking }>('/api/room-bookings', { method: 'POST', body: JSON.stringify(input) })
+    return result.booking
+  },
+
+  async listMyRoomBookings() {
+    const result = await request<{ bookings: RoomBooking[] }>('/api/room-bookings')
+    return result.bookings
+  },
+
+  async listOwnerRoomBookings() {
+    const result = await request<{ bookings: RoomBooking[] }>('/api/owner/room-bookings')
+    return result.bookings
+  },
+
+  async updateOwnerRoomBooking(bookingId, status, reason) {
+    const result = await request<{ booking: RoomBooking }>(`/api/owner/room-bookings/${bookingId}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ status, reason: reason ?? '' }),
+    })
+    return result.booking
+  },
+
+  async cancelRoomBooking(bookingId, reason) {
+    const result = await request<{ booking: RoomBooking }>(`/api/room-bookings/${bookingId}/cancel`, {
+      method: 'POST',
+      body: JSON.stringify({ reason: reason ?? 'Cancelled by student' }),
+    })
+    return result.booking
   },
 
   async uploadImage(file) {
@@ -82,14 +173,175 @@ export const liveClient: ApiClient = {
     return response.json() as Promise<{ objectUrl: string }>
   },
 
+  async getPaymentConfig() {
+    return request<PaymentConfig>('/api/payments/config')
+  },
+
+  async createPaymentOrder(input) {
+    return request<PaymentOrderResult>('/api/payments/create-order', { method: 'POST', body: JSON.stringify(input) })
+  },
+
+  async verifyPayment(input) {
+    return request<{ verified: boolean; alreadyVerified: boolean; payment: PaymentRecord }>('/api/payments/verify', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    })
+  },
+
+  async failPayment(paymentId, reason) {
+    const result = await request<{ payment: PaymentRecord }>(`/api/payments/${paymentId}/fail`, {
+      method: 'POST',
+      body: JSON.stringify({ reason }),
+    })
+    return result.payment
+  },
+
   async checkoutPayment(input) {
     const result = await request<{ payment: { id: string; status: string; upiIntent?: string; upiQrData?: string; upiError?: string } }>('/api/payments/checkout', { method: 'POST', body: JSON.stringify(input) })
     return { paymentId: result.payment.id, status: result.payment.status, upiIntent: result.payment.upiIntent, upiQrData: result.payment.upiQrData, upiError: result.payment.upiError }
   },
 
   async listPayments() {
-    const result = await request<{ payments: { id: string; purpose: string; amount: number; method: string; status: string }[] }>('/api/payments')
+    const result = await request<{ payments: PaymentRecord[] }>('/api/payments')
     return result.payments
+  },
+
+  async listProducts(filters) {
+    const params = new URLSearchParams()
+    if (filters?.search) params.set('search', filters.search)
+    if (filters?.category && filters.category !== 'all') params.set('category', filters.category)
+    if (filters?.minPrice !== undefined) params.set('min_price', String(filters.minPrice))
+    if (filters?.maxPrice !== undefined) params.set('max_price', String(filters.maxPrice))
+    if (filters?.location) params.set('location', filters.location)
+    if (filters?.inStockOnly) params.set('in_stock_only', 'true')
+    const query = params.toString()
+    const result = await request<{ products: Product[] }>(`/api/products${query ? `?${query}` : ''}`)
+    return result.products
+  },
+
+  async getProduct(productId) {
+    const result = await request<{ product: Product }>(`/api/products/${productId}`)
+    return result.product
+  },
+
+  async createProduct(input) {
+    const result = await request<{ product: Product }>('/api/products', { method: 'POST', body: JSON.stringify(input) })
+    return result.product
+  },
+
+  async updateProduct(productId, input) {
+    const result = await request<{ product: Product }>(`/api/products/${productId}`, { method: 'PUT', body: JSON.stringify(input) })
+    return result.product
+  },
+
+  async updateProductStock(productId, stock) {
+    const result = await request<{ product: Product }>(`/api/products/${productId}/stock`, { method: 'PATCH', body: JSON.stringify({ stock }) })
+    return result.product
+  },
+
+  async toggleProductStatus(productId, isActive) {
+    const result = await request<{ product: Product }>(`/api/products/${productId}/status`, { method: 'PATCH', body: JSON.stringify({ isActive }) })
+    return result.product
+  },
+
+  async deleteProduct(productId) {
+    return request<{ deleted: boolean; deactivated: boolean }>(`/api/products/${productId}`, { method: 'DELETE' })
+  },
+
+  async listSellerProducts() {
+    const result = await request<{ products: Product[] }>('/api/seller/products')
+    return result.products
+  },
+
+  async listSellerOrders() {
+    return request<{ orders: SellerOrderItem[]; summary: { totalRevenue: number; pendingOrders: number; processedOrders: number; unitsSold: number } }>('/api/seller/orders')
+  },
+
+  async updateSellerOrderStatus(orderItemId, sellerStatus) {
+    const result = await request<{ item: { id: string; sellerStatus: string; orderStatus: string } }>(`/api/seller/orders/${orderItemId}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ sellerStatus }),
+    })
+    return result.item
+  },
+
+  async getCart() {
+    const result = await request<{ cart: Cart }>('/api/cart')
+    return result.cart
+  },
+
+  async addToCart(productId, quantity = 1) {
+    const result = await request<{ cart: Cart }>('/api/cart/items', { method: 'POST', body: JSON.stringify({ productId, quantity }) })
+    return result.cart
+  },
+
+  async updateCartItem(itemId, quantity) {
+    const result = await request<{ cart: Cart }>(`/api/cart/items/${itemId}`, { method: 'PATCH', body: JSON.stringify({ quantity }) })
+    return result.cart
+  },
+
+  async removeCartItem(itemId) {
+    const result = await request<{ cart: Cart }>(`/api/cart/items/${itemId}`, { method: 'DELETE' })
+    return result.cart
+  },
+
+  async clearCart() {
+    const result = await request<{ cart: Cart }>('/api/cart', { method: 'DELETE' })
+    return result.cart
+  },
+
+  async createOrder(input) {
+    const result = await request<{ order: ProductOrder }>('/api/orders', { method: 'POST', body: JSON.stringify(input) })
+    return result.order
+  },
+
+  async listOrders() {
+    const result = await request<{ orders: ProductOrder[] }>('/api/orders')
+    return result.orders
+  },
+
+  async cancelOrder(orderId, reason) {
+    const result = await request<{ order: ProductOrder }>(`/api/orders/${orderId}/cancel`, {
+      method: 'POST',
+      body: JSON.stringify({ reason: reason ?? 'Cancelled by student' }),
+    })
+    return result.order
+  },
+
+  async listNotifications() {
+    return request<{ unreadCount: number; notifications: NotificationItem[] }>('/api/notifications')
+  },
+
+  async markNotificationRead(notificationId) {
+    await request(`/api/notifications/${notificationId}/read`, { method: 'PATCH' })
+  },
+
+  async markAllNotificationsRead() {
+    await request('/api/notifications/read-all', { method: 'POST' })
+  },
+
+  async getAdminOverview() {
+    return request<{ stats: AdminStats }>('/api/admin/overview')
+  },
+
+  async listAdminUsers() {
+    const result = await request<{ users: User[] }>('/api/admin/users')
+    return result.users
+  },
+
+  async updateAdminUserRole(userId, role) {
+    const result = await request<{ user: User }>(`/api/admin/users/${userId}/role`, { method: 'PATCH', body: JSON.stringify({ role }) })
+    return result.user
+  },
+
+  async toggleAdminHostelVerify(hostelId) {
+    const result = await request<{ hostel: { id: string; verified: boolean } }>(`/api/admin/hostels/${hostelId}/verify`, { method: 'PATCH' })
+    return result.hostel
+  },
+
+  async toggleAdminProduct(productId) {
+    const result = await request<{ product: { id: string; isActive: boolean } }>(`/api/admin/products/${productId}/toggle`, { method: 'PATCH' })
+    return result.product
   },
 
   async aiChat(message) {
@@ -132,7 +384,7 @@ export const liveClient: ApiClient = {
   async getMessMenu() {
     const result = await request<{ menu: Meal[] }>('/api/mess/menu')
     return result.menu.map((meal, index) => ({
-      id: String(index + 1),
+      id: meal.id ?? String(index + 1),
       name: meal.name ?? meal.meal,
       menu: meal.menu,
       time: meal.time,
@@ -158,7 +410,7 @@ export const liveClient: ApiClient = {
   },
 
   async getOwnerDashboard() {
-    return request<{ role: User['role']; requests: { id: string; studentId: string; targetType: string; targetName: string; moveIn: string; duration: string; message: string; status: string }[]; payments: { purpose: string; amount: number; status: string }[]; roomListings: { id: string; title: string; area: string; price: number }[]; messListings: { id: string; title: string; meal: string; price: number }[]; marketListings: { id: string; title: string; price: number }[] }>('/api/owner/dashboard')
+    return request('/api/owner/dashboard')
   },
 
   async updateOwnerRequest(requestId, status) {
@@ -166,8 +418,7 @@ export const liveClient: ApiClient = {
   },
 
   async listListings() {
-    const result = await request<{ listings: Listing[] }>('/api/marketplace/listings')
-    return result.listings
+    return this.listProducts()
   },
 
   async listConversations() {

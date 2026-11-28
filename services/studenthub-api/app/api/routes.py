@@ -2,14 +2,48 @@ import os
 import uuid
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.core.auth import create_token, hash_password, require_user, verify_password
 from app.core.config import load_config
 from app.core.database import get_db
-from app.models.entities import BookingRequest, Expense, Feedback, Hostel, MessPlan, OwnerListing, Payment, RoommateGroup, RoommateProfile, SupportRequest, User
-from app.schemas.contracts import AIChatRequest, BookingRequestCreate, BookingStatusUpdate, ExpenseRequest, FeedbackRequest, HostelCreateRequest, LoginRequest, MarketplaceListingCreateRequest, MessPlanCreateRequest, PaymentRequest, RegisterRequest, ReportRequest, RoommateGroupRequest, RoommateProfileRequest, SupportRequestCreate, UploadRequest
-from app.services.providers import OpenAIProvider, BlobStorageProvider
+from app.models.entities import (
+    BookingRequest,
+    Expense,
+    Feedback,
+    Hostel,
+    MessPlan,
+    OrderItem,
+    Payment,
+    Product,
+    ProductCategory,
+    ProductImage,
+    RoomBooking,
+    RoommateGroup,
+    RoommateProfile,
+    SupportRequest,
+    User,
+)
+from app.schemas.contracts import (
+    AIChatRequest,
+    BookingRequestCreate,
+    BookingStatusUpdate,
+    ExpenseRequest,
+    FeedbackRequest,
+    LoginRequest,
+    MarketplaceListingCreateRequest,
+    MessPlanCreateRequest,
+    PaymentRequest,
+    ProfileUpdateRequest,
+    RegisterRequest,
+    ReportRequest,
+    RoommateGroupRequest,
+    RoommateProfileRequest,
+    SupportRequestCreate,
+    UploadRequest,
+)
+from app.services.providers import BlobStorageProvider, OpenAIProvider
 
 router = APIRouter(prefix="/api")
 
@@ -23,7 +57,7 @@ ROOMMATES = [
 @router.get("/health")
 def health(db: Session = Depends(get_db)):
     try:
-        db.execute(__import__("sqlalchemy").text("SELECT 1"))
+        db.execute(text("SELECT 1"))
         return {"status": "healthy", "database": "connected", "storage": "configured"}
     except Exception as exc:
         raise HTTPException(status_code=503, detail="Database unavailable") from exc
@@ -36,13 +70,15 @@ def register(body: RegisterRequest, db: Session = Depends(get_db)):
     email = body.email.strip().lower()
     if db.query(User).filter(User.email == email).first():
         raise HTTPException(status_code=409, detail="An account already exists for this email")
-    email = body.email.strip().lower()
     user = User(name=body.name.strip(), email=email, password_hash=hash_password(body.password), role=body.role)
     db.add(user)
     db.commit()
     db.refresh(user)
     token = create_token(str(user.id), user.role)
-    return {"user": {"id": str(user.id), "name": user.name, "email": user.email, "role": user.role}, "session": {"token": token}}
+    return {
+        "user": {"id": str(user.id), "name": user.name, "email": user.email, "role": user.role, "phone": user.phone, "course": user.course},
+        "session": {"token": token},
+    }
 
 
 @router.post("/auth/login")
@@ -51,7 +87,10 @@ def login(body: LoginRequest, db: Session = Depends(get_db)):
     if not user or not verify_password(body.password, user.password_hash):
         raise HTTPException(status_code=401, detail="Invalid email or password")
     token = create_token(str(user.id), user.role)
-    return {"user": {"id": str(user.id), "name": user.name, "email": user.email, "role": user.role}, "session": {"token": token}}
+    return {
+        "user": {"id": str(user.id), "name": user.name, "email": user.email, "role": user.role, "phone": user.phone, "course": user.course},
+        "session": {"token": token},
+    }
 
 
 @router.get("/auth/me")
@@ -59,25 +98,20 @@ def current_user(_user: dict = Depends(require_user), db: Session = Depends(get_
     user = db.get(User, int(_user["sub"]))
     if not user:
         raise HTTPException(status_code=401, detail="Account not found")
-    return {"user": {"id": str(user.id), "name": user.name, "email": user.email, "role": user.role}}
+    return {"user": {"id": str(user.id), "name": user.name, "email": user.email, "role": user.role, "phone": user.phone, "course": user.course}}
 
 
-@router.get("/hostels")
-def hostels(area: str | None = None, max_rent: float | None = None, amenities: str | None = None, db: Session = Depends(get_db)):
-    query = db.query(Hostel)
-    if area:
-        query = query.filter(Hostel.area.ilike(f"%{area}%"))
-    if max_rent:
-        query = query.filter(Hostel.rent <= max_rent)
-    rows = query.order_by(Hostel.rating.desc()).all()
-    wanted = [item.strip().lower() for item in (amenities or "").split(",") if item.strip()]
-    result = []
-    for row in rows:
-        row_amenities = [item.strip() for item in (row.amenities or "").split("|") if item.strip()]
-        if wanted and not all(any(w in available.lower() for available in row_amenities) for w in wanted):
-            continue
-        result.append({"id": str(row.id), "name": row.name, "area": row.area, "rent": row.rent, "rating": row.rating, "verified": row.verified, "amenities": row_amenities, "image": row.image_url})
-    return {"hostels": result, "pagination": {"page": 1, "pageSize": 20, "total": len(result)}}
+@router.put("/auth/me")
+def update_current_user(body: ProfileUpdateRequest, _user: dict = Depends(require_user), db: Session = Depends(get_db)):
+    user = db.get(User, int(_user["sub"]))
+    if not user:
+        raise HTTPException(status_code=401, detail="Account not found")
+    user.name = body.name.strip()
+    user.phone = body.phone.strip()
+    user.course = body.course.strip()
+    db.commit()
+    db.refresh(user)
+    return {"user": {"id": str(user.id), "name": user.name, "email": user.email, "role": user.role, "phone": user.phone, "course": user.course}}
 
 
 @router.get("/hostels/compare")
@@ -89,21 +123,22 @@ def compare_hostels(ids: str, db: Session = Depends(get_db)):
         amenities = [item.strip() for item in (row.amenities or "").split("|") if item.strip()]
         safety_score = min(100, round(row.rating * 18 + (12 if "Security" in amenities else 0)))
         value_score = min(100, round((len(amenities) * 12) + max(0, 100 - (row.rent / 100))))
-        comparisons.append({"id": str(row.id), "name": row.name, "area": row.area, "rent": row.rent, "rating": row.rating, "amenities": amenities, "safetyScore": safety_score, "valueScore": value_score, "image": row.image_url})
+        comparisons.append(
+            {
+                "id": str(row.id),
+                "name": row.name,
+                "area": row.area,
+                "rent": row.rent,
+                "rating": row.rating,
+                "amenities": amenities,
+                "safetyScore": safety_score,
+                "valueScore": value_score,
+                "image": row.image_url,
+            }
+        )
     cheapest = min(comparisons, key=lambda item: item["rent"])["id"] if comparisons else None
     safest = max(comparisons, key=lambda item: item["safetyScore"])["id"] if comparisons else None
     return {"rooms": comparisons, "recommendation": {"cheapest": cheapest, "safest": safest}}
-
-
-@router.post("/hostels", status_code=201)
-def create_hostel(body: HostelCreateRequest, _user: dict = Depends(require_user), db: Session = Depends(get_db)):
-    if _user["role"] not in {"hostel_owner", "admin"}:
-        raise HTTPException(status_code=403, detail="Only hostel owners can add rooms")
-    row = Hostel(owner_id=int(_user["sub"]), name=body.name, area=body.area, rent=body.rent, rating=body.rating, verified=False, amenities="|".join(body.amenities), image_url=body.imageUrl)
-    db.add(row)
-    db.commit()
-    db.refresh(row)
-    return {"hostel": {"id": str(row.id), "name": row.name, "area": row.area, "rent": row.rent, "rating": row.rating, "verified": row.verified, "amenities": body.amenities, "image": row.image_url}}
 
 
 @router.post("/uploads/image")
@@ -144,15 +179,21 @@ def combination_recommendations(max_monthly_cost: float | None = None, db: Sessi
         safety_score = min(100, round(room.rating * 18 + (12 if "Security" in amenities else 0)))
         roommate = max(ROOMMATES, key=lambda item: item["match"])
         score = round((room.rating / 5 * 35) + (safety_score * 0.35) + (roommate["match"] * 0.30))
-        combinations.append({
-            "id": f"combo-{room.id}", "room": {"id": str(room.id), "name": room.name, "area": room.area, "rent": room.rent, "amenities": amenities, "verified": room.verified, "image": room.image_url},
-            "roommate": {"id": roommate["id"], "name": roommate["name"], "match": roommate["match"], "course": roommate["course"]},
-            "mess": {"name": "North Campus Mess", "monthlyCost": mess_monthly, "status": "Approved"},
-            "monthlyCost": {"room": room.rent, "mess": mess_monthly, "transport": transport_monthly, "essentials": essentials_monthly, "total": monthly_total},
-            "safetyScore": safety_score, "freshness": "Updated today", "availability": "Available", "decisionScore": score,
-        })
+        combinations.append(
+            {
+                "id": f"combo-{room.id}",
+                "room": {"id": str(room.id), "name": room.name, "area": room.area, "rent": room.rent, "amenities": amenities, "verified": room.verified, "image": room.image_url},
+                "roommate": {"id": roommate["id"], "name": roommate["name"], "match": roommate["match"], "course": roommate["course"]},
+                "mess": {"name": "North Campus Mess", "monthlyCost": mess_monthly, "status": "Approved"},
+                "monthlyCost": {"room": room.rent, "mess": mess_monthly, "transport": transport_monthly, "essentials": essentials_monthly, "total": monthly_total},
+                "safetyScore": safety_score,
+                "freshness": "Updated today",
+                "availability": "Available" if room.is_available and room.available_rooms > 0 else "Waitlist",
+                "decisionScore": score,
+            }
+        )
     combinations.sort(key=lambda item: item["decisionScore"], reverse=True)
-    return {"combinations": combinations, "status": {"collegeVerification": "Live in MVP", "payments": "Demo records", "ai": "Rule-based MVP"}}
+    return {"combinations": combinations, "status": {"collegeVerification": "Live in MVP", "payments": "Razorpay gateway", "ai": "Rule-based MVP"}}
 
 
 @router.get("/roommates/matches")
@@ -180,10 +221,14 @@ async def roommates(course: str | None = None, budget_max: int | None = None, pr
     requested_hobby = hobby or ""
     for item in matches:
         score = item["match"]
-        if requested_sleep and requested_sleep.lower() in item["sleep"].lower(): score += 2
-        if requested_study and requested_study.lower() in item["study"].lower(): score += 2
-        if requested_diet and requested_diet.lower() in item["diet"].lower(): score += 2
-        if requested_hobby and any(requested_hobby.lower() in value.lower() for value in item["hobbies"]): score += 2
+        if requested_sleep and requested_sleep.lower() in item["sleep"].lower():
+            score += 2
+        if requested_study and requested_study.lower() in item["study"].lower():
+            score += 2
+        if requested_diet and requested_diet.lower() in item["diet"].lower():
+            score += 2
+        if requested_hobby and any(requested_hobby.lower() in value.lower() for value in item["hobbies"]):
+            score += 2
         result.append({**item, "budget": "₹" + item["budget"].replace("-", "–₹"), "match": min(score, 100), "explanation": await ai.explain_match(item["name"])})
     return {"matches": result}
 
@@ -229,16 +274,20 @@ def roommate_candidates(_user: dict = Depends(require_user), db: Session = Depen
         if current:
             if current.sleep and profile.sleep:
                 matches += 25 if current.sleep.lower() == profile.sleep.lower() or "flexible" in (current.sleep.lower(), profile.sleep.lower()) else 0
-                if current.sleep.lower() != profile.sleep.lower() and "flexible" not in (current.sleep.lower(), profile.sleep.lower()): disagreements.append("Sleep schedule")
+                if current.sleep.lower() != profile.sleep.lower() and "flexible" not in (current.sleep.lower(), profile.sleep.lower()):
+                    disagreements.append("Sleep schedule")
             if current.study and profile.study:
                 matches += 25 if current.study.lower() == profile.study.lower() else 0
-                if current.study.lower() != profile.study.lower(): disagreements.append("Study style")
+                if current.study.lower() != profile.study.lower():
+                    disagreements.append("Study style")
             if current.diet and profile.diet:
                 matches += 25 if current.diet.lower() == profile.diet.lower() else 0
-                if current.diet.lower() != profile.diet.lower(): disagreements.append("Diet")
+                if current.diet.lower() != profile.diet.lower():
+                    disagreements.append("Diet")
             shared_hobbies = set(value.strip().lower() for value in current.hobbies.split(",") if value.strip()) & set(value.strip().lower() for value in profile.hobbies.split(",") if value.strip())
             matches += 25 if shared_hobbies else 0
-            if not shared_hobbies and current.hobbies and profile.hobbies: disagreements.append("Hobbies")
+            if not shared_hobbies and current.hobbies and profile.hobbies:
+                disagreements.append("Hobbies")
             if current.budget and profile.budget:
                 matches += 15 if abs(current.budget - profile.budget) <= 2000 else 0
         candidates.append({"id": str(user.id), "name": user.name, "email": user.email, "course": profile.course or "Not set", "budget": profile.budget, "sleep": profile.sleep or "Not set", "study": profile.study or "Not set", "diet": profile.diet or "Not set", "hobbies": [value.strip() for value in profile.hobbies.split(",") if value.strip()], "compatibility": min(matches, 100), "disagreements": disagreements})
@@ -278,10 +327,10 @@ def mess_menu(db: Session = Depends(get_db)):
     menu = [
         {"meal": "Breakfast", "menu": "Masala dosa, idli, fruit", "time": "7:30–9:30 AM", "state": "Available", "price": 90, "rating": 4.6, "image": "https://images.unsplash.com/photo-1630383249896-424e482df921?w=900"},
         {"meal": "Lunch", "menu": "Rajma, jeera rice, roti, salad", "time": "12:30–2:30 PM", "state": "Serving", "price": 120, "rating": 4.8, "image": "https://images.unsplash.com/photo-1547592180-85f173990554?w=900"},
-        {"meal": "Dinner", "menu": "Paneer masala, dal, rice, roti", "time": "7:30–9:30 PM", "state": "Upcoming", "price": 140, "rating": 4.7, "image": "https://images.unsplash.com/photo-1547592180-85f173990554?w=900"}
+        {"meal": "Dinner", "menu": "Paneer masala, dal, rice, roti", "time": "7:30–9:30 PM", "state": "Upcoming", "price": 140, "rating": 4.7, "image": "https://images.unsplash.com/photo-1547592180-85f173990554?w=900"},
     ]
     owner_plans = db.query(MessPlan).order_by(MessPlan.id.desc()).all()
-    menu.extend({"meal": plan.meal, "menu": plan.menu, "time": plan.time, "state": "Available", "price": plan.price, "rating": 0, "image": plan.image_url} for plan in owner_plans)
+    menu.extend({"id": str(plan.id), "meal": plan.meal, "menu": plan.menu, "time": plan.time, "state": "Available", "price": plan.price, "rating": 4.5, "image": plan.image_url} for plan in owner_plans)
     return {"menu": menu, "subscriptions": [{"mess": "North Campus Mess", "plan": "November", "state": "Approved"}]}
 
 
@@ -300,25 +349,71 @@ def create_mess_plan(body: MessPlanCreateRequest, _user: dict = Depends(require_
 def create_marketplace_listing(body: MarketplaceListingCreateRequest, _user: dict = Depends(require_user), db: Session = Depends(get_db)):
     if _user["role"] not in {"seller", "admin"}:
         raise HTTPException(status_code=403, detail="Only sellers can publish marketplace listings")
-    listing = OwnerListing(owner_id=int(_user["sub"]), owner_role="seller", title=body.title, category=body.category, price=body.price, details=body.condition, contact_name=body.contactName, contact_phone=body.contactPhone, image_url=body.imageUrl)
-    db.add(listing)
+    slug = body.category.strip().lower()
+    cat = db.query(ProductCategory).filter(ProductCategory.slug == slug).first()
+    product = Product(
+        seller_id=int(_user["sub"]),
+        category_id=cat.id if cat else None,
+        category=slug,
+        title=body.title.strip(),
+        description=f"{body.condition} item listed by {body.contactName}",
+        price=round(body.price, 2),
+        stock=1,
+        condition=body.condition,
+        listing_type="new_seller",
+        location="Campus Store",
+        contact_name=body.contactName.strip(),
+        contact_phone=body.contactPhone.strip(),
+        image_url=body.imageUrl,
+        is_active=True,
+    )
+    db.add(product)
     db.commit()
-    db.refresh(listing)
-    return {"listing": {"id": str(listing.id), "title": listing.title, "seller": listing.contact_name, "contactName": listing.contact_name, "contactPhone": listing.contact_phone, "price": listing.price, "condition": listing.details, "rating": 0, "listingType": "seller", "category": listing.category, "image": listing.image_url}}
+    db.refresh(product)
+    if product.image_url:
+        db.add(ProductImage(product_id=product.id, image_url=product.image_url, sort_order=0))
+        db.commit()
+    return {
+        "listing": {
+            "id": str(product.id),
+            "title": product.title,
+            "seller": product.contact_name,
+            "contactName": product.contact_name,
+            "contactPhone": product.contact_phone,
+            "price": product.price,
+            "condition": product.condition,
+            "rating": product.rating,
+            "listingType": product.listing_type,
+            "category": product.category,
+            "stock": product.stock,
+            "image": product.image_url,
+        }
+    }
 
 
 @router.get("/marketplace/listings")
 def marketplace_listings(db: Session = Depends(get_db)):
+    rows = db.query(Product).filter(Product.is_active == True).order_by(Product.id.desc()).all()
     listings = [
-        {"id": "l1", "title": "Dell Inspiron 15", "seller": "Riya M.", "contactName": "Riya M.", "contactPhone": "", "price": 38500, "condition": "Excellent", "rating": 4.8, "listingType": "used_senior", "category": "electronics", "image": "https://images.unsplash.com/photo-1496181133206-80ce9b88a853?w=900"},
-        {"id": "l2", "title": "Engineering drawing set", "seller": "Arjun P.", "contactName": "Arjun P.", "contactPhone": "", "price": 1200, "condition": "Like new", "rating": 4.7, "listingType": "used_senior", "category": "books", "image": "https://images.unsplash.com/photo-1456324504439-367cee3b3c32?w=900"},
-        {"id": "l3", "title": "Single bed with mattress", "seller": "Sana K.", "contactName": "Sana K.", "contactPhone": "", "price": 6800, "condition": "Good", "rating": 4.6, "listingType": "used_senior", "category": "essentials", "image": "https://images.unsplash.com/photo-1505693416388-ac5ce068fe85?w=900"},
-        {"id": "l4", "title": "Engineering Mathematics - Latest Edition", "seller": "Campus Book Store", "contactName": "Campus Book Store", "contactPhone": "", "price": 950, "condition": "Brand new", "rating": 4.9, "listingType": "new_seller", "category": "books", "image": "https://images.unsplash.com/photo-1495446815901-a7297e633e8d?w=900"},
-        {"id": "l5", "title": "Study Desk Lamp", "seller": "Campus Essentials Co.", "contactName": "Campus Essentials Co.", "contactPhone": "", "price": 699, "condition": "Brand new", "rating": 4.8, "listingType": "new_seller", "category": "essentials", "image": "https://images.unsplash.com/photo-1507473885765-e6ed057f782c?w=900"}
+        {
+            "id": str(row.id),
+            "title": row.title,
+            "description": row.description,
+            "seller": row.contact_name,
+            "contactName": row.contact_name,
+            "contactPhone": row.contact_phone,
+            "price": row.price,
+            "stock": row.stock,
+            "condition": row.condition,
+            "rating": row.rating,
+            "listingType": row.listing_type,
+            "category": row.category,
+            "location": row.location,
+            "image": row.image_url,
+        }
+        for row in rows
     ]
-    owner_rows = db.query(OwnerListing).order_by(OwnerListing.id.desc()).all()
-    listings.extend({"id": str(row.id), "title": row.title, "seller": row.contact_name, "contactName": row.contact_name, "contactPhone": row.contact_phone, "price": row.price, "condition": row.details, "rating": 0, "listingType": "seller", "category": row.category, "image": row.image_url} for row in owner_rows)
-    return {"listings": listings, "pagination": {"page": 1, "pageSize": 20, "total": len(listings)}}
+    return {"listings": listings, "pagination": {"page": 1, "pageSize": 50, "total": len(listings)}}
 
 
 @router.post("/booking-requests", status_code=201)
@@ -330,8 +425,8 @@ def create_booking_request(body: BookingRequestCreate, _user: dict = Depends(req
         row = db.get(Hostel, int(body.targetId)) if body.targetId.isdigit() else None
         owner_id = row.owner_id if row and row.owner_id else int(_user["sub"])
     elif body.targetType == "listing":
-        row = db.get(OwnerListing, int(body.targetId)) if body.targetId.isdigit() else None
-        owner_id = row.owner_id if row else int(_user["sub"])
+        prod = db.get(Product, int(body.targetId)) if body.targetId.isdigit() else None
+        owner_id = prod.seller_id if prod else int(_user["sub"])
     elif body.targetType == "mess":
         row = db.get(MessPlan, int(body.targetId)) if body.targetId.isdigit() else None
         owner_id = row.owner_id if row else int(_user["sub"])
@@ -348,27 +443,59 @@ def owner_dashboard(_user: dict = Depends(require_user), db: Session = Depends(g
     owner_id = int(_user["sub"])
     if role not in {"hostel_owner", "mess_owner", "seller", "admin"}:
         raise HTTPException(status_code=403, detail="Owner dashboard access is required")
+
     requests = db.query(BookingRequest).filter(BookingRequest.owner_id == owner_id).order_by(BookingRequest.id.desc()).all()
     room_listings = db.query(Hostel).filter(Hostel.owner_id == owner_id).all() if role in {"hostel_owner", "admin"} else []
     mess_listings = db.query(MessPlan).filter(MessPlan.owner_id == owner_id).all() if role in {"mess_owner", "admin"} else []
-    market_listings = db.query(OwnerListing).filter(OwnerListing.owner_id == owner_id).all() if role in {"seller", "admin"} else []
+    market_listings = (
+        (db.query(Product).all() if role == "admin" else db.query(Product).filter(Product.seller_id == owner_id).all())
+        if role in {"seller", "admin"}
+        else []
+    )
+    room_bookings = (
+        (db.query(RoomBooking).order_by(RoomBooking.id.desc()).all() if role == "admin" else db.query(RoomBooking).filter(RoomBooking.owner_id == owner_id).order_by(RoomBooking.id.desc()).all())
+        if role in {"hostel_owner", "admin"}
+        else []
+    )
+    order_items = (
+        (db.query(OrderItem).order_by(OrderItem.id.desc()).all() if role == "admin" else db.query(OrderItem).filter(OrderItem.seller_id == owner_id).order_by(OrderItem.id.desc()).all())
+        if role in {"seller", "admin"}
+        else []
+    )
 
     payments = []
-    for request in requests:
-        amount = 0
-        if request.target_type == "room":
-            listing = db.get(Hostel, int(request.target_id)) if request.target_id.isdigit() else None
-            amount = listing.rent if listing else 0
-        elif request.target_type == "mess":
-            listing = db.get(MessPlan, int(request.target_id)) if request.target_id.isdigit() else None
+    for booking in room_bookings:
+        payments.append(
+            {
+                "purpose": f"{booking.booking_code} · {booking.hostel.name if booking.hostel else 'Room'}",
+                "amount": booking.total_amount,
+                "status": "completed" if booking.status == "Paid" else "pending",
+            }
+        )
+    for item in order_items:
+        order = item.order
+        if order:
+            payments.append(
+                {
+                    "purpose": f"{order.order_number} · {item.product_title} (x{item.quantity})",
+                    "amount": item.line_total,
+                    "status": "completed" if order.payment_status == "paid" else "pending",
+                }
+            )
+    for req in requests:
+        if req.target_type == "mess":
+            listing = db.get(MessPlan, int(req.target_id)) if req.target_id.isdigit() else None
             amount = listing.price if listing else 2800
-        elif request.target_type == "listing":
-            listing = db.get(OwnerListing, int(request.target_id)) if request.target_id.isdigit() else None
-            amount = listing.price if listing else 0
-        if amount:
-            payments.append({"purpose": request.target_name, "amount": amount, "status": "completed" if request.status == "approved" else "pending"})
+            payments.append({"purpose": req.target_name, "amount": amount, "status": "completed" if req.status == "approved" else "pending"})
 
-    return {"role": role, "requests": [{"id": str(row.id), "studentId": str(row.student_id), "targetType": row.target_type, "targetName": row.target_name, "moveIn": row.move_in, "duration": row.duration, "message": row.message, "status": row.status.title()} for row in requests], "payments": payments, "roomListings": [{"id": str(row.id), "title": row.name, "area": row.area, "price": row.rent} for row in room_listings], "messListings": [{"id": str(row.id), "title": row.name, "meal": row.meal, "price": row.price} for row in mess_listings], "marketListings": [{"id": str(row.id), "title": row.title, "price": row.price} for row in market_listings]}
+    return {
+        "role": role,
+        "requests": [{"id": str(row.id), "studentId": str(row.student_id), "targetType": row.target_type, "targetName": row.target_name, "moveIn": row.move_in, "duration": row.duration, "message": row.message, "status": row.status.title()} for row in requests],
+        "payments": payments,
+        "roomListings": [{"id": str(row.id), "title": row.name, "area": row.area, "price": row.rent, "availableRooms": row.available_rooms, "totalRooms": row.total_rooms} for row in room_listings],
+        "messListings": [{"id": str(row.id), "title": row.name, "meal": row.meal, "price": row.price} for row in mess_listings],
+        "marketListings": [{"id": str(row.id), "title": row.title, "price": row.price, "stock": row.stock, "isActive": row.is_active} for row in market_listings],
+    }
 
 
 @router.patch("/owner/requests/{request_id}")
@@ -388,25 +515,19 @@ def update_owner_request(request_id: int, body: BookingStatusUpdate, _user: dict
 async def presign(body: UploadRequest, _user: dict = Depends(require_user)):
     if _user["role"] not in {"hostel_owner", "mess_owner", "seller", "admin"}:
         raise HTTPException(status_code=403, detail="Only service owners can request listing uploads")
-    if _user["role"] not in {"hostel_owner", "mess_owner", "seller", "admin"}:
-        raise HTTPException(status_code=403, detail="Only service owners can request listing uploads")
     config = load_config()
     return await BlobStorageProvider(config.storage_connection_string).create_presigned_upload(body.type, body.filename, body.contentType)
 
 
 @router.get("/conversations")
 def conversations(_user: dict = Depends(require_user)):
-    return {"conversations": [
-        {"id": "c1", "contact": "Scholar House", "subject": "Room inspection", "lastMessage": "The 4 PM slot is confirmed.", "state": "Unread"},
-        {"id": "c2", "contact": "North Campus Mess", "subject": "November plan", "lastMessage": "Your renewal is approved.", "state": "Read"},
-        {"id": "c3", "contact": "Student Support", "subject": "Document review", "lastMessage": "Please upload the revised ID proof.", "state": "Open"}
-    ]}
-
-
-@router.get("/payments")
-def payment_history(_user: dict = Depends(require_user), db: Session = Depends(get_db)):
-    rows = db.query(Payment).filter(Payment.user_id == int(_user["sub"])).order_by(Payment.id.desc()).all()
-    return {"payments": [{"id": str(row.id), "purpose": row.purpose, "amount": row.amount, "method": row.method, "status": row.status} for row in rows]}
+    return {
+        "conversations": [
+            {"id": "c1", "contact": "Scholar House", "subject": "Room inspection", "lastMessage": "The 4 PM slot is confirmed.", "state": "Unread"},
+            {"id": "c2", "contact": "North Campus Mess", "subject": "November plan", "lastMessage": "Your renewal is approved.", "state": "Read"},
+            {"id": "c3", "contact": "Student Support", "subject": "Document review", "lastMessage": "Please upload the revised ID proof.", "state": "Open"},
+        ]
+    }
 
 
 @router.post("/feedback", status_code=201)
@@ -463,24 +584,30 @@ def add_support_request(body: SupportRequestCreate, _user: dict = Depends(requir
 def checkout(body: PaymentRequest, _user: dict = Depends(require_user), db: Session = Depends(get_db)):
     if _user["role"] != "student":
         raise HTTPException(status_code=403, detail="Only students can make purchases")
-    status = "pending" if body.method == "upi" else "completed"
-    payment = Payment(user_id=int(_user["sub"]), purpose=body.purpose, amount=body.amount, method=body.method, status=status)
-    db.add(payment)
-    db.commit()
-    db.refresh(payment)
-    response = {"id": str(payment.id), "purpose": payment.purpose, "amount": payment.amount, "method": payment.method, "status": payment.status}
     if body.method == "upi":
         config = load_config()
         merchant_vpa = body.recipientVpa or config.upi_merchant_vpa
+        payment = Payment(user_id=int(_user["sub"]), purpose=body.purpose, amount=body.amount, method=body.method, status="pending", gateway="upi")
+        db.add(payment)
+        db.commit()
+        db.refresh(payment)
+        response = {"id": str(payment.id), "purpose": payment.purpose, "amount": payment.amount, "method": payment.method, "status": payment.status}
         if not merchant_vpa:
             response["upiError"] = "UPI merchant VPA is not configured"
         else:
             import urllib.parse
+
             merchant_name = body.recipientName or config.upi_merchant_name
             params = urllib.parse.urlencode({"pa": merchant_vpa, "pn": merchant_name, "am": f"{body.amount:.2f}", "cu": "INR", "tn": f"{body.purpose}-{payment.id}"})
             response["upiIntent"] = f"upi://pay?{params}"
             response["upiQrData"] = response["upiIntent"]
-    return {"payment": response}
+        return {"payment": response}
+    # For card/cash without gateway: record as pending unless verified via gateway
+    payment = Payment(user_id=int(_user["sub"]), purpose=body.purpose, amount=body.amount, method=body.method, status="pending", gateway="manual")
+    db.add(payment)
+    db.commit()
+    db.refresh(payment)
+    return {"payment": {"id": str(payment.id), "purpose": payment.purpose, "amount": payment.amount, "method": payment.method, "status": payment.status}}
 
 
 @router.post("/ai/chat")
@@ -491,17 +618,17 @@ async def ai_chat(body: AIChatRequest, _user: dict = Depends(require_user), db: 
         if rooms:
             lowest = rooms[0]
             amenities = lowest.amenities or "basic amenities"
-            reply = f"Lowest-price match: {lowest.name} in {lowest.area} is ₹{int(lowest.rent):,}/month with {amenities.replace('|', ', ')}. I included its rating of {lowest.rating:.1f}/5; open Room Search to compare it with safer or higher-value options."
+            reply = f"Lowest-price match: {lowest.name} in {lowest.area} is ₹{int(lowest.rent):,}/month with {amenities.replace('|', ', ')}. I included its rating of {lowest.rating:.1f}/5; open Find Rooms to inspect availability and book."
         else:
             reply = "No rooms are available yet. Add a room or ask me to search again after listings are published."
     elif any(word in message for word in ("roommate", "match")):
         reply = "Search roommates by course, maximum budget, and preference. Your strongest compatibility signals are schedule, cleanliness, and lifestyle."
     elif any(word in message for word in ("mess", "meal", "dinner")):
-        reply = "Tonight's dinner is in the mess menu. Choose Renew plan to subscribe for the month."
-    elif any(word in message for word in ("payment", "pay", "checkout")):
-        reply = "Payments are recorded securely in demo mode. Choose UPI, card, or cash and confirm the checkout."
+        reply = "Tonight's dinner is in the mess menu. Choose Pay & renew to subscribe for the month."
+    elif any(word in message for word in ("payment", "pay", "checkout", "order", "product")):
+        reply = "Add essentials to your cart or open a room detail page to book and pay securely via Razorpay checkout."
     else:
-        reply = "I can help with rooms, roommates, mess plans, essentials, and payments. Tell me what you are looking for."
+        reply = "I can help with rooms, roommates, mess plans, marketplace products, and payments. Tell me what you are looking for."
     return {"reply": reply}
 
 

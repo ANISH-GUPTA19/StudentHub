@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { formatLocalDate, formatLocalTime, getLocalTimeZoneName } from './utils/time'
 
 const campuses = [
   'AITD Kanpur, Uttar Pradesh',
@@ -17,20 +18,9 @@ export function LiveCampusWidget() {
     return () => window.clearInterval(timer)
   }, [])
 
-  const formatted = new Intl.DateTimeFormat('en-IN', {
-    timeZone: 'Asia/Kolkata',
-    weekday: 'long',
-    day: 'numeric',
-    month: 'long',
-    year: 'numeric',
-  }).format(now)
-  const time = new Intl.DateTimeFormat('en-IN', {
-    timeZone: 'Asia/Kolkata',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-    hour12: true,
-  }).format(now)
+  const formatted = formatLocalDate(now)
+  const time = formatLocalTime(now, true)
+  const timeZone = getLocalTimeZoneName()
 
   const selectCampus = (value: string) => {
     setCampus(value)
@@ -53,23 +43,29 @@ export function LiveCampusWidget() {
     )
   }
 
-  return <section className="live-campus-widget" aria-label="Live campus information">
-    <div className="live-campus-widget__time">
-      <strong>{time}</strong>
-      <span>{formatted}</span>
-      <small>Asia/Kolkata (IST)</small>
-    </div>
-    <div className="live-campus-widget__location">
-      <span>Campus</span>
-      <select value={campus} onChange={event => selectCampus(event.target.value)} aria-label="Select campus">
-        {campuses.map(item => <option key={item} value={item}>{item}</option>)}
-      </select>
-      <button type="button" onClick={useCurrentLocation} disabled={locationState === 'loading'}>
-        {locationState === 'loading' ? 'Locating...' : 'Use current location'}
-      </button>
-      {locationState === 'denied' && <small>Location denied. Using selected campus.</small>}
-      {locationState === 'unavailable' && <small>Geolocation unavailable. Using selected campus.</small>}
-      {locationState === 'granted' && <small>Permission granted. Showing selected campus.</small>}
-    </div>
-  </section>
+  return (
+    <section className="live-campus-widget" aria-label="Live campus information">
+      <div className="live-campus-widget__time">
+        <strong>{time}</strong>
+        <span>{formatted}</span>
+        <small>{timeZone}</small>
+      </div>
+      <div className="live-campus-widget__location">
+        <span>Campus</span>
+        <select value={campus} onChange={(event) => selectCampus(event.target.value)} aria-label="Select campus">
+          {campuses.map((item) => (
+            <option key={item} value={item}>
+              {item}
+            </option>
+          ))}
+        </select>
+        <button type="button" onClick={useCurrentLocation} disabled={locationState === 'loading'}>
+          {locationState === 'loading' ? 'Locating...' : 'Use current location'}
+        </button>
+        {locationState === 'denied' && <small>Location denied. Using selected campus.</small>}
+        {locationState === 'unavailable' && <small>Geolocation unavailable. Using selected campus.</small>}
+        {locationState === 'granted' && <small>Permission granted. Showing selected campus.</small>}
+      </div>
+    </section>
+  )
 }

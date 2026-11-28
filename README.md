@@ -22,3 +22,7 @@ services/studenthub-api/.venv/Scripts/python -m uvicorn app.main:app --app-dir s
 ```powershell
 docker compose up --build
 ```
+
+ docker compose up -d postgres azurite 
+ 
+docker compose run --rm db-migrate h
